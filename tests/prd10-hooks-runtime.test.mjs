@@ -1002,7 +1002,7 @@ describe("PRD-v2 section 10: compaction delivery, recall and decision rows (GP6)
 
   // ---------- compactSummary "none" (DECISIONS-r6 D6) ----------
 
-  test("[M4] SessionStart(compact) on codex (none): the renderState block, once per session (A23)", async () => {
+  test("[M4] SessionStart(compact) on codex (none): the renderState block, once per compaction (A23, #1396)", async () => {
     const s = sid();
     await handleHook("codex", payload(s, { hook_event_name: "UserPromptSubmit", prompt: "fix the flaky login test" }), env);
     await waitRows("SELECT seq FROM events WHERE session_id = ?", [s], 1);
@@ -1013,6 +1013,24 @@ describe("PRD-v2 section 10: compaction delivery, recall and decision rows (GP6)
     assert.ok(text.includes('session="' + s + '"'), text);
     const again = await handleHook("codex", payload(s, { hook_event_name: "SessionStart", source: "compact" }), env);
     assert.equal(again.stdout, "");
+  });
+
+  test("#1396 SessionStart(compact) on claude-code: one state block per compaction in one session, a repeat of the same compaction stays silent", async () => {
+    const s = sid();
+    const compact = () => handleHook("claude-code", payload(s, { hook_event_name: "SessionStart", source: "compact" }), env);
+    await handleHook("claude-code", payload(s, { hook_event_name: "UserPromptSubmit", prompt: "fix the flaky login test" }), env);
+    await waitRows("SELECT seq FROM events WHERE session_id = ?", [s], 1);
+    const first = context(await compact());
+    assert.ok(first !== null && isStateBlock(first), String(first));
+    assert.ok(first.includes("fix the flaky login test"), first);
+    assert.equal((await compact()).stdout, "", "a repeat of the same compaction stays silent");
+    await handleHook("claude-code", payload(s, { hook_event_name: "UserPromptSubmit", prompt: "now ship the billing export" }), env);
+    await waitRows("SELECT seq FROM events WHERE session_id = ?", [s], 2);
+    const second = context(await compact());
+    assert.ok(second !== null && isStateBlock(second), "the second compaction gets its own state block: " + String(second));
+    assert.ok(second.includes("now ship the billing export"), second);
+    assert.ok(second.includes('session="' + s + '"'), second);
+    assert.notEqual(second, first);
   });
 
   test("[M4] SessionStart(compact) on codex with an empty journal: the empty state block, never a throw", async () => {
@@ -1092,6 +1110,51 @@ describe("PRD-v2 section 10: compaction delivery, recall and decision rows (GP6)
     // below threshold: an unrelated prompt adds nothing
     const off = await handleHook("claude-code", payload(s, { hook_event_name: "UserPromptSubmit", prompt: "what is the weather" }), env);
     assert.deepEqual(off, { stdout: "", exitCode: 0 });
+  });
+
+  // #1394: recall pushes state the compaction took away (DECISIONS-r11 B). A row written after the latest
+  // SessionStart(compact) is still in the model's live context, so recall never sends it again; a row from
+  // before the boundary still comes back.
+  test("[M7] recall/compaction-boundary (#1394): rows after the latest compaction stay out, rows before it come back", async () => {
+    const s = sid();
+    await longSession("claude-code", s, "UserPromptSubmit");
+    await handleHook("claude-code", payload(s, { hook_event_name: "SessionStart", source: "compact" }), env);
+    await handleHook("claude-code", payload(s, {
+      hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm run bundle:quokkafrob" },
+      tool_response: { stdout: "", stderr: "quokkafrob bundle failed: EACCES writing dist/quokkafrob.js", is_error: true },
+    }), env);
+    await waitRows("SELECT seq FROM events WHERE session_id = ? AND kind = 'toolerr'", [s], 2);
+    const post = query("SELECT seq FROM events WHERE session_id = ? AND kind = 'toolerr' ORDER BY seq DESC", s)[0];
+    // a host-made prompt (task-notification) that names the post-compaction row
+    const late = context(await handleHook("claude-code", payload(s, {
+      hook_event_name: "UserPromptSubmit", prompt: "<task-notification>why did the quokkafrob bundle fail with EACCES</task-notification>",
+    }), env));
+    assert.ok(late === null || !late.includes("#" + post.seq + " "), "post-compaction row recalled: " + String(late));
+    assert.ok(late === null || !late.includes("quokkafrob bundle failed"), String(late));
+    // the pre-compaction row is still recalled
+    const pre = query("SELECT seq FROM events WHERE session_id = ? AND kind = 'toolerr' ORDER BY seq ASC", s)[0];
+    const text = context(await handleHook("claude-code", payload(s, { hook_event_name: "UserPromptSubmit", prompt: ASK_ERROR }), env));
+    assert.ok(text !== null && text.includes("#" + pre.seq + " toolerr Bash: "), String(text));
+  });
+
+  test("[M7] recall/compaction-boundary units (#1394): line units of an output after the latest compaction stay out", async () => {
+    const s = sid();
+    await longSession("claude-code", s, "UserPromptSubmit");
+    await handleHook("claude-code", payload(s, { hook_event_name: "SessionStart", source: "compact" }), env);
+    const PLANTED = "walrusbeam deploy rolled back after 41 health check failures on canary-3";
+    const lines = [];
+    for (let i = 0, n = 0; n < SYNC_INDEX_MAX_BYTES - 2000; i++) {
+      const l = i === 50 ? PLANTED : "step " + i + " of the release pipeline finished in " + (i % 17) + " s on runner " + (i % 5);
+      lines.push(l);
+      n += Buffer.byteLength(l, "utf8") + 1;
+    }
+    await handleHook("claude-code", payload(s, {
+      hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "cat deploy.log", description: "deploy log" },
+      tool_use_id: "toolu_1394", tool_response: { stdout: lines.join("\n"), stderr: "", interrupted: false, isImage: false },
+    }), env);
+    await waitRows("SELECT 1 FROM line_units WHERE session_id = ?", [s], lines.length);
+    const text = context(await handleHook("claude-code", payload(s, { hook_event_name: "UserPromptSubmit", prompt: "why did the walrusbeam deploy roll back on canary-3" }), env));
+    assert.ok(text === null || !text.includes(PLANTED), "post-compaction line unit recalled: " + String(text));
   });
 
   // #1330 (Lcstyle, aron-intframe): the first prompt is 30 KB of the README; a later output holds README lines and
@@ -2435,6 +2498,43 @@ describe("PRD-v2 section 10: saving on live payload shapes", () => {
     const r = await handlers.tool_result({ type: "tool_result", toolCallId: "c3", toolName: "read", input,
       content: [{ type: "text", text: big }], isError: false, details: undefined }, ctx);
     assert.equal(r, undefined);
+  });
+
+  // #1392: OMP 18.21.0 read has `path` only, with the line range inline (src/tools/read.ts:899-901, read-selector.ts
+  // parseSel: :N, :N-M, :N+K, :N-, :-N, comma lists, :raw before or after). A ranged path is the user's own window
+  // (D-R41-READ-OFFSET-1); a path with no range (bare, :raw alone, a drive letter) is a full read and stays replaced.
+  async function ompHandlers(repo) {
+    const { hostExtension } = await import("../src/entries/pi.ts");
+    const handlers = {};
+    hostExtension({ on: (e, h) => { handlers[e] = h; }, registerTool: () => {} }, "omp");
+    const ctx = { cwd: repo, sessionManager: { getSessionId: () => "o1" } };
+    await handlers.before_agent_start({ systemPrompt: ["base"] }, ctx);
+    return { handlers, ctx };
+  }
+
+  test("omp tool_result of a `read` with a line range in the path is not replaced (#1392)", async (t) => {
+    const { repo, big } = sandbox(t);
+    const { handlers, ctx } = await ompHandlers(repo);
+    const ranged = ["logs/app.log:50-120", "logs/app.log:50+40", "logs/app.log:50", "logs/app.log:50-", "logs/app.log:-60",
+      "logs/app.log:5-16,960-973", "logs/app.log:2-4:raw", "logs/app.log:raw:2-4", "D:/x/app.log:50-120"];
+    const whole = [];
+    for (const p of ranged) {
+      const r = await handlers.tool_result({ type: "tool_result", toolCallId: "r-" + p, toolName: "read", input: { path: p },
+        content: [{ type: "text", text: big }], isError: false, details: undefined }, ctx);
+      if (r === undefined) whole.push(p);
+    }
+    assert.deepEqual(whole, ranged, "every ranged read reaches the model whole");
+  });
+
+  test("omp tool_result of a full `read` (no range in the path) is still replaced (#1392)", async (t) => {
+    const { repo, big } = sandbox(t);
+    const { handlers, ctx } = await ompHandlers(repo);
+    for (const p of ["logs/app.log", "logs/app.log:raw", "D:/x/app.log", "D:\\x\\app.log", "logs/app.log:img", "logs/v1:2/app.log"]) {
+      const r = await handlers.tool_result({ type: "tool_result", toolCallId: "f-" + p, toolName: "read", input: { path: p },
+        content: [{ type: "text", text: big }], isError: false, details: undefined }, ctx);
+      assert.ok(r !== undefined, p + " is replaced");
+      assert.ok(Buffer.byteLength(r.content[0].text) < Buffer.byteLength(big) / 2, p + ": replaced text is under half the raw output");
+    }
   });
 
   test("gemini AfterTool of a bounded read_file (offset/limit) is not replaced (#1314)", async (t) => {
