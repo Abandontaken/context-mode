@@ -42,6 +42,10 @@ export const REPLACE_TRIGGER_BYTES = readReplaceTrigger(process.env[REPLACE_TRIG
 // PostToolUse lets it through whole. Claude Code, Pi, Gemini: offset/limit; VS Code read_file and Copilot view map to them.
 export const RANGE_READ_TOOLS = Object.freeze(["Read", "view"]);
 export const READ_RANGE_KEYS = Object.freeze(["offset", "limit", "view_range"]);
+// D-1404-SKILL-LOAD-1 (#1404): a skill-load tool (canonical name) returns a skill's instructions, which the model must
+// read whole: PostToolUse lets it through. Claude Code calls it Skill (its PostToolUse matcher leaves it out); OpenCode's
+// native `skill` maps to it. Every other tool output over the trigger keeps the replace.
+export const SKILL_LOAD_TOOLS = Object.freeze(["Skill"]);
 export const REPLACE_RETURN_BYTES = 96; // D-M7-SV-3: was 512 (D-M7-SV-2), 1024 before; sweeps in DEVIATIONS
 // D-M2-JSON-1: a parser-found shape digest (schema, counts, whole rows) has its own budget, independent of the handle line.
 export const SHAPE_RETURN_BYTES = 256;
@@ -67,6 +71,12 @@ export function SUBAGENT_HANDLE_LINE(handle: string, bytes: number, read: boolea
 // D-CC-POINTER-5: every word is a POSIX single-quoted word, so the shell runs no $( ), backtick or $VAR in it.
 export function SEARCH_TWIN_LINE(searchPath: string, handle: string, terms: string, projectDir: string): string {
   return " Or run: node " + shellWord(searchPath) + " " + handle + " " + shellWord(terms) + " " + shellWord(projectDir);
+}
+// D-CC-POINTER-6 (#1406): Claude Code kept the whole output in this file (D-M2-SHAPE-2) and the replace drops the host's
+// persistedOutputPath field, so the pointer names the file. A Read with offset and limit passes whole
+// (D-R41-READ-OFFSET-1), so the caller pages through the output in order.
+export function PERSISTED_FILE_LINE(file: string): string {
+  return " The whole output is also in " + JSON.stringify(file) + "; Read it with offset and limit.";
 }
 // D-CC-POINTER-5: one POSIX shell word. Inside single quotes sh, bash and Git Bash expand nothing; a ' closes the
 // quote, adds an escaped ', and opens it again.
@@ -125,6 +135,14 @@ export const PIPE_EOF_GRACE_MS = 250;
 // D-1337-EXIT-SETTLE-1: the most time the pipe drain may take after exit, so a survivor that keeps writing cannot hold the call.
 export const PIPE_DRAIN_MAX_MS = 2000;
 export const DB_TIMEOUT_MS = 5000; // ADR-0002, PRD §4
+// D-1401-SPOOL-1 (#1401): a hook process waits at most this long for the write lock, then puts the write in the
+// project spool. The host kills a hook at HOOK_TIMEOUT_MS, so a hook never waits DB_TIMEOUT_MS.
+export const HOOK_BUSY_MS = 250;
+export const HOOK_SPOOL_DIR = "pending"; // D-1401-SPOOL-1: <projectDir>/pending, one JSON file per waiting write
+// D-1401-SPOOL-1: a claimed spool file older than this has no live drainer (the host killed it); another hook takes it.
+export const SPOOL_CLAIM_STALE_MS = 30000;
+// D-1401-SPOOL-1: the most time one hook spends writing spool files into the store; the rest waits for the next hook.
+export const SPOOL_DRAIN_MS = 1000;
 export const DB_WAL_SUFFIX = "-wal"; // impl/02 §6.1 step 4, DEVIATIONS D-M1-T5-1: WAL sibling of context.db
 export const DB_SHM_SUFFIX = "-shm"; // impl/02 §6.1 step 4, DEVIATIONS D-M1-T5-1: shared-memory sibling of context.db
 export const DB_TMP_SUFFIX = ".tmp"; // DEVIATIONS D-M2-CI-3: private build name of a new context.db before linkSync publishes it
@@ -223,6 +241,9 @@ export const FRONTMATTER_FENCE = "---";
 export const FRONTMATTER_TOOLS_KEY = "tools";
 export const FRONTMATTER_DISALLOWED_KEY = "disallowedTools";
 export const MCP_SERVER_TOOL_PREFIX = "mcp__"; // Claude-shape MCP name; a bare "mcp__<server>" rule covers all its tools
+// D-1402-PLUGIN-CALL-1 (#1402): Claude Code gives a plugin mod's $.mcp.call this tool_use_id prefix (2.1.322 d6n/s_r);
+// the result goes back to the mod in a virtual message, never to the model.
+export const PLUGIN_CALL_ID_PREFIX = "toolu_plugin_";
 export const MCP_NAME_JOIN = "__"; // Claude-shape join between server and tool name
 export const GEMINI_MCP_PREFIX = "mcp_"; // generateValidName(): "mcp_" + server + "_" + tool (ADR-0016 Gemini row)
 export const GEMINI_NAME_EXTRA_CHARS = "_-.:"; // kept besides A-Z a-z 0-9; any other char becomes "_"
