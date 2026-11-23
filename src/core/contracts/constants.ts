@@ -210,6 +210,9 @@ export const RUN_SESSION_PREFIX = "mcp:"; // §4 step 5, 00 A8: no MCP _meta, + 
 // D-CR2-SID-1: the env var a host sets in the MCP server process to the session id its hooks receive.
 // Claude Code 2.1.303 sets CLAUDE_CODE_SESSION_ID (probe: equals the hook payload session_id). A host not listed keeps mcp:<serverId>.
 export const HOST_SESSION_ENV: Readonly<Partial<Record<string, string>>> = Object.freeze({ "claude-code": "CLAUDE_CODE_SESSION_ID" });
+// D-1411-ZCODE-SID-1: the _meta key a host uses for the session id its hooks receive, when it is not sessionId.
+// ZCode (zai-org/ZCode fec97590 mcpRequestMeta) sends _meta.session_id on every tools/call and sets no session env.
+export const HOST_SESSION_META: Readonly<Partial<Record<string, string>>> = Object.freeze({ zcode: "session_id" });
 
 // Runtime
 export const NODE_MIN = "24.15.0"; // S-NODE
@@ -618,6 +621,8 @@ export const D6_UNKNOWN_DETAIL = "no clientInfo or protocolVersion on the reques
 export const D6_IN_PROCESS_DETAIL = "in-process plugin: this call ran inside the agent, no MCP session to read"; // PASS (D-R49-DOCTOR-1339-3)
 export function D7_DETAIL(got: string): string { return `resolved project source ${got} does not match the host's actual cwd`; }
 export const D7_FIX = "restart the agent in the correct directory";
+export function D7_NO_PROJECT_DETAIL(kind: string): string { return `Project source ${kind} is missing`; } // D-1410-DOCTOR-NO-PROJECT-1
+export const DOCTOR_NEEDS_PROJECT_DETAIL = "runs once the project resolves; D7 names the project source"; // D-1410-DOCTOR-NO-PROJECT-1
 export function D8_STALE_SCHEMA_DETAIL(got: number, want: number): string { return `stale schema (v${got}, expected v${want})`; }
 export const D8_INTEGRITY_DETAIL = "integrity_check failed";
 export const D8_INTEGRITY_FIX = "doctor will heal context.db on the next run";

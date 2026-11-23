@@ -239,6 +239,19 @@ describe("PRD-v2 section 10: dispatch, replace and handle line (GP3, GP6)", () =
     assert.deepEqual(rows.map((r) => ({ ...r })), [{ kind: "toolerr", ok: 0, key: 'Grep:{"path":"src","pattern":"x"}', path: "src" }]);
   });
 
+  test("PostToolUseFailure (#1408, ADR-0009 §1): a failed Claude Code host tool writes a toolerr row, hook output stays empty", async () => {
+    const p = cc({ hook_event_name: "PostToolUseFailure", tool_name: "Grep", tool_input: { pattern: "y", path: "lib" }, tool_use_id: "toolu_f1", error: "Exit code 2\nboom", is_interrupt: false, duration_ms: 7 });
+    const out = await handleHook("claude-code", p, env);
+    assert.equal(out.stdout, "");
+    const rows = await waitRows("SELECT kind, ok, key, path FROM events WHERE session_id = ?", [p.session_id], 1);
+    assert.deepEqual(rows.map((r) => ({ ...r })), [{ kind: "toolerr", ok: 0, key: 'Grep:{"path":"lib","pattern":"y"}', path: "lib" }]);
+    // The host takes only additionalContext on this event: a large error gets no replace, the hook output stays empty.
+    const big = cc({ hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command: "make" }, tool_use_id: "toolu_f2", error: "Exit code 1\n" + "e".repeat(20000) });
+    assert.equal((await handleHook("claude-code", big, env)).stdout, "");
+    const bigRows = await waitRows("SELECT kind, ok, bytes, returned_bytes FROM events WHERE session_id = ?", [big.session_id], 1);
+    assert.deepEqual(bigRows.map((r) => ({ ...r })), [{ kind: "toolerr", ok: 0, bytes: 20012, returned_bytes: 20012 }]);
+  });
+
   test("PostToolUse Edit: edit row with the file path", async () => {
     const p = cc({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "/a/b.ts" }, tool_response: "ok" });
     await handleHook("claude-code", p, env);
